@@ -17,8 +17,6 @@ include { BCFTOOLS_VIEW as RESEARCH_FILTERING      } from '../modules/nf-core/bc
 include { BCFTOOLS_VIEW as CLINICAL_FILTERING      } from '../modules/nf-core/bcftools/view/main'
 include { SVDB_QUERY as SVDB_QUERY_DB              } from '../modules/nf-core/svdb/query/main'
 include { ENSEMBLVEP_VEP as ENSEMBLVEP_SV          } from '../modules/nf-core/ensemblvep/vep/main'
-include { BCFTOOLS_VIEW as RESEARCH_FILTERING_SV   } from '../modules/nf-core/bcftools/view/main'
-include { BCFTOOLS_VIEW as CLINICAL_FILTERING_SV   } from '../modules/nf-core/bcftools/view/main'
 
 //
 // MODULE: Local modules
@@ -111,7 +109,7 @@ workflow ONCOREFINER {
     ANNOTATE SNVs
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 */
-        // Process SNV VCF files
+        // Annotate SNV VCF files
         if (params.snv_vcf) {
 
             // Vcfanno
@@ -122,49 +120,19 @@ workflow ONCOREFINER {
                     tuple(meta, vcf, tbi, resources)
                     }
                 .set { ch_vcfanno_in }
+
             VCFANNO (ch_vcfanno_in, ch_vcfanno_toml, ch_vcfanno_lua, ch_vcfanno_resources)
 
-
-            // Quality Filtering
             VCFANNO.out.vcf
                 .join(VCFANNO.out.tbi)
                 .map { meta, vcf, tbi ->
-                    tuple(meta, vcf, tbi)
+                    tuple(meta + [variant_type: 'snv'], vcf, tbi)
                     }
-                .set { ch_research_filtering_in }
-            RESEARCH_FILTERING(ch_research_filtering_in, [], [], [])
-
-
-            // VEP
-            RESEARCH_FILTERING.out.vcf
-                    .map { meta, vcf ->
-                        tuple(meta, vcf, [])
-                    }
-                    .set { ch_vep_snv }
-
-            ENSEMBLVEP_SNV (
-                ch_vep_snv,
-                params.genome,
-                params.species,
-                params.vep_cache_version,
-                ch_vep_cache,
-                ch_genome_fasta,
-                ch_vep_extra_files
-            )
-
-            // Clinical Filtering
-            ENSEMBLVEP_SNV.out.vcf
-                .join(ENSEMBLVEP_SNV.out.tbi)
-                .map { meta, vcf, tbi ->
-                    tuple(meta, vcf, tbi)
-                    }
-                .set { ch_clinical_filtering_in }
-            CLINICAL_FILTERING(ch_clinical_filtering_in, [], [], [])
-
+                .set { ch_research_snvs_to_filter }
 
         }
 
-        // Process SV VCF files
+        // Annotate SV VCF files
         if (params.sv_vcf) {
 
             // SVDB QUERY
@@ -189,19 +157,63 @@ workflow ONCOREFINER {
                 []
             )
 
-
-            // Quality Filtering
             SVDB_QUERY_DB.out.vcf
                 .map { meta, vcf ->
-                    tuple(meta, vcf, []) }
-                .set { ch_research_filtering_sv_in }
+                    tuple(meta + [variant_type: 'sv'], vcf, [])
+                }
+                .set { ch_research_svs_to_filter }
+        }
 
-            RESEARCH_FILTERING_SV(ch_research_filtering_sv_in, [], [], [])
+        // Research Filtering
+        channel.empty()
+            .mix(params.snv_vcf ? ch_research_snvs_to_filter : channel.empty())
+            .mix(params.sv_vcf  ? ch_research_svs_to_filter : channel.empty())
+            .set { ch_research_filtering_in }
+
+        RESEARCH_FILTERING (
+            ch_research_filtering_in,
+            [],
+            [],
+            []
+        )
+
+        // Annotate SNVs with VEP
+        if (params.snv_vcf) {
+            // VEP
+            RESEARCH_FILTERING.out.vcf
+                .filter { meta, _vcf -> meta.variant_type == 'snv' }
+                .map { meta, vcf ->
+                    tuple(meta, vcf, [])
+                }
+                .set { ch_vep_snv }
+
+            ENSEMBLVEP_SNV (
+                ch_vep_snv,
+                params.genome,
+                params.species,
+                params.vep_cache_version,
+                ch_vep_cache,
+                ch_genome_fasta,
+                ch_vep_extra_files
+            )
+
+            ENSEMBLVEP_SNV.out.vcf
+                .join(ENSEMBLVEP_SNV.out.tbi)
+                .map { meta, vcf, tbi ->
+                    tuple(meta + [variant_type: 'snv'], vcf, tbi)
+                    }
+                .set { ch_clinical_snvs_to_filter }
+        }
+
+        // Annotate SVs with VEP
+        if (params.sv_vcf) {
 
             // VEP
-            RESEARCH_FILTERING_SV.out.vcf
+            RESEARCH_FILTERING.out.vcf
+                .filter { meta, _vcf -> meta.variant_type == 'sv' }
                 .map { meta, vcf ->
-                            tuple(meta, vcf, []) }
+                    tuple(meta, vcf, [])
+                }
                 .set { ch_vep_sv }
 
 
@@ -215,17 +227,27 @@ workflow ONCOREFINER {
                 ch_vep_extra_files
             )
 
-            // Clinical Filtering
             ENSEMBLVEP_SV.out.vcf
                 .join(ENSEMBLVEP_SV.out.tbi)
                 .map { meta, vcf, tbi ->
-                    tuple(meta, vcf, tbi)
-                    }
-                .set { ch_clinical_filtering_sv_in }
-            CLINICAL_FILTERING_SV(ch_clinical_filtering_sv_in, [], [], [])
-
+                    tuple(meta + [variant_type: 'sv'], vcf, tbi)
+                }
+                .set { ch_clinical_svs_to_filter }
 
         }
+
+        // Clinical filtering
+        channel.empty()
+            .mix(params.snv_vcf ? ch_clinical_snvs_to_filter : channel.empty())
+            .mix(params.sv_vcf  ? ch_clinical_svs_to_filter : channel.empty())
+            .set { ch_clinical_filtering_in }
+
+        CLINICAL_FILTERING(
+            ch_clinical_filtering_in,
+            [],
+            [],
+            []
+        )
 
 
 /*
